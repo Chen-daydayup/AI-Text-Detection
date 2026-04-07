@@ -1,0 +1,7 @@
+AI 文本检测模型对比结果
+========================================
+Length-only LR:   Acc=0.5405, AUC=0.6189
+Perplexity + LR:  Acc=0.7240, AUC=0.7834
+TF-IDF + LR:      Acc=0.7628, AUC=0.8463
+BERT Fine-tune:   Acc=0.9263, AUC=0.9798
+BERT+PPL Fusion:  Acc=0.8518, AUC=0.9299

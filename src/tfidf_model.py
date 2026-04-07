@@ -13,7 +13,7 @@ def run_tfidf_lr():
     y_train, y_test = train['label'], test['label']
     
     # TF-IDF 特征提取
-    tfidf = TfidfVectorizer(max_features=10000, stop_words='english', max_df=0.9)
+    tfidf = TfidfVectorizer(max_features=10000, stop_words=None, max_df=0.9,ngram_range=(1,2))
     X_train = tfidf.fit_transform(train_text)
     X_test = tfidf.transform(test_text)
     

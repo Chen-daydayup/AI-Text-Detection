@@ -5,7 +5,6 @@ from sklearn.metrics import accuracy_score
 from transformers import GPT2Tokenizer, GPT2LMHeadModel
 from src.preprocess import load_hc3_data, clean_text
 
-# 全局加载模型（避免重复加载）
 device = "cuda" if torch.cuda.is_available() else "cpu"
 tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
 model = GPT2LMHeadModel.from_pretrained("gpt2").to(device)
@@ -51,7 +50,7 @@ def run_perplexity_lr():
     lr.fit(X_train, y_train)
     y_pred = lr.predict(X_test)
     
-    y_score = lr.predict_proba(X_test)[:, 1]  # 输出AI类别概率
+    y_score = lr.predict_proba(X_test)[:, 1]  
     
     acc = accuracy_score(y_test, y_pred)
     print(f"Perplexity + LR 准确率: {acc:.4f}")

@@ -1,4 +1,3 @@
-# ====================== 这里修改 1/2 ======================
 from src.tfidf_model import run_tfidf_lr
 from src.perplexity_model import run_perplexity_lr
 from src.bert_model import run_bert_finetune
@@ -12,7 +11,7 @@ import seaborn as sns
 from sklearn.metrics import confusion_matrix, roc_curve, auc
 from sklearn.manifold import TSNE
 from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.svm import LinearSVC
+from sklearn.linear_model import LogisticRegression
 from transformers import BertTokenizer, BertModel
 import torch
 import os
@@ -70,7 +69,7 @@ def analyze_text_length():
     print(f"{'Human':<10} {avg_human:.1f} 字符")
     print(f'{"AI":<10} {avg_ai:.1f} 字符')
     print("="*60)
-    
+
     plt.figure(figsize=(8, 5))
     bins = np.arange(0, 1001, 20)
     
@@ -108,20 +107,24 @@ def visualize_all_tsne():
 
     train, test = load_hc3_data()
     df = pd.concat([train, test], ignore_index=True)
-    texts = [clean_text(str(t)) for t in df["text"]]
-    labels = df["label"].values
     
-    # ====================== 修复：强制CPU + 正确拼写 ======================
-    device = "cpu"  # 直接用CPU，永不爆显存
+    df_human = df[df['label'] == 0].sample(n=3000, random_state=42)  
+    df_ai = df[df['label'] == 1].sample(n=3000, random_state=42)     
+    df_sampled = pd.concat([df_human, df_ai], ignore_index=True)    
+    
+    texts = [clean_text(str(t)) for t in df_sampled["text"]]
+    labels = df_sampled["label"].values
+    
+    device = "cpu"  
 
     print("📊 生成 TF-IDF t-SNE...")
-    tfidf = TfidfVectorizer(max_features=10000)
+    tfidf = TfidfVectorizer(max_features=10000, max_df=0.9, ngram_range=(1,2))
     emb_tfidf = tfidf.fit_transform(texts).toarray()
     tsne = TSNE(n_components=2, random_state=42, init="random", perplexity=30)
     emb2d = tsne.fit_transform(emb_tfidf)
     plt.figure(figsize=(8,6))
-    plt.scatter(emb2d[labels==0,0], emb2d[labels==0,1], c="blue", label="Human", alpha=0.6)
-    plt.scatter(emb2d[labels==1,0], emb2d[labels==1,1], c="red", label="AI", alpha=0.6)
+    plt.scatter(emb2d[labels==0,0], emb2d[labels==0,1], c="blue", label="Human", alpha=0.4, s=12)
+    plt.scatter(emb2d[labels==1,0], emb2d[labels==1,1], c="red", label="AI", alpha=0.4, s=12)
     plt.title("t-SNE (TF-IDF Features)")
     plt.legend()
     plt.tight_layout()
@@ -142,8 +145,8 @@ def visualize_all_tsne():
     emb_bert = np.array(emb_bert)
     emb2d = TSNE(n_components=2, random_state=42, init="random", perplexity=30).fit_transform(emb_bert)
     plt.figure(figsize=(8,6))
-    plt.scatter(emb2d[labels==0,0], emb2d[labels==0,1], c="blue", label="Human", alpha=0.6)
-    plt.scatter(emb2d[labels==1,0], emb2d[labels==1,1], c="red", label="AI", alpha=0.6)
+    plt.scatter(emb2d[labels==0,0], emb2d[labels==0,1], c="blue", label="Human", alpha=0.4, s=12)
+    plt.scatter(emb2d[labels==1,0], emb2d[labels==1,1], c="red", label="AI", alpha=0.4, s=12)
     plt.title("t-SNE (BERT Embeddings)")
     plt.legend()
     plt.tight_layout()
@@ -154,8 +157,8 @@ def visualize_all_tsne():
     emb_fusion = get_fusion_features(texts)
     emb2d = TSNE(n_components=2, random_state=42, init="random", perplexity=30).fit_transform(emb_fusion)
     plt.figure(figsize=(8,6))
-    plt.scatter(emb2d[labels==0,0], emb2d[labels==0,1], c="blue", label="Human", alpha=0.6)
-    plt.scatter(emb2d[labels==1,0], emb2d[labels==1,1], c="red", label="AI", alpha=0.6)
+    plt.scatter(emb2d[labels==0,0], emb2d[labels==0,1], c="blue", label="Human", alpha=0.4, s=12)
+    plt.scatter(emb2d[labels==1,0], emb2d[labels==1,1], c="red", label="AI", alpha=0.4, s=12)
     plt.title("t-SNE (BERT + Perplexity Fusion)")
     plt.legend()
     plt.tight_layout()
@@ -174,13 +177,14 @@ def get_top_tfidf_features():
     texts = [clean_text(str(t)) for t in df["text"]]
     labels = df["label"].values
 
-    tfidf = TfidfVectorizer(max_features=10000, ngram_range=(1,2))
+    tfidf = TfidfVectorizer(max_features=10000, max_df=0.9,ngram_range=(1,2))
     X = tfidf.fit_transform(texts)
-    svm = LinearSVC()
-    svm.fit(X, labels)
+
+    model = LogisticRegression(max_iter=1000)
+    model.fit(X, labels)
 
     feats = tfidf.get_feature_names_out()
-    coef = svm.coef_[0]
+    coef = model.coef_[0]
 
     top_ai = [feats[i] for i in coef.argsort()[-20:]][::-1]
     top_human = [feats[i] for i in coef.argsort()[:20]]
@@ -230,7 +234,8 @@ def compare_models():
     print("=" * 70)
     print("🚀 AI 生成文本检测：五模型对比实验")
     print("=" * 70)
-    
+
+    #  数据分析与可视化
     analyze_text_length()
     visualize_all_tsne()
     get_top_tfidf_features()
@@ -238,14 +243,14 @@ def compare_models():
     train, test = load_hc3_data()
     test_texts = [clean_text(str(t)) for t in test["text"]]
     y_test = test["label"].values
-
+    
+    # 运行各模型并保存错误样本
     acc4, y_true4, y_pred4, y_score4 = run_length_lr()
     save_error_examples("Length", y_true4, y_pred4, test_texts)
 
     acc2, y_true2, y_pred2, y_score2 = run_perplexity_lr()
     save_error_examples("Perplexity", y_true2, y_pred2, test_texts)
 
-    # ====================== 这里修改 2/2 ======================
     acc1, y_true1, y_pred1, y_score1 = run_tfidf_lr()
     save_error_examples("TF-IDF-LR", y_true1, y_pred1, test_texts)
 
@@ -255,12 +260,14 @@ def compare_models():
     acc5, y_true5, y_pred5, y_score5 = run_bert_ppl_fusion()
     save_error_examples("BERT-PPL-Fusion", y_true5, y_pred5, test_texts)
 
+    # 绘制性能对比图表
     auc4 = plot_metrics(y_true4, y_pred4, y_score4, "Length-only-LR")
     auc2 = plot_metrics(y_true2, y_pred2, y_score2, "Perplexity-LR")
     auc1 = plot_metrics(y_true1, y_pred1, y_score1, "TF-IDF-LR")
     auc3 = plot_metrics(y_true3, y_pred3, y_score3, "BERT")
     auc5 = plot_metrics(y_true5, y_pred5, y_score5, "BERT-PPL-Fusion")
 
+    # 最终结果对比表
     print("\n" + "=" * 70)
     print("📊 最终模型性能对比表")
     print("=" * 70)
@@ -283,3 +290,6 @@ def compare_models():
         f.write(f"BERT+PPL Fusion:  Acc={acc5:.4f}, AUC={auc5:.4f}\n")
 
     print("\n✅ 全部任务完成！")
+
+if __name__ == "__main__":
+    compare_models()

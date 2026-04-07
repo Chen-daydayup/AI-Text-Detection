@@ -26,6 +26,7 @@ def get_bert_sentence_embeddings(texts):
             out = model(**inputs)
             cls_emb = out.last_hidden_state[:, 0, :].squeeze().cpu().numpy()
             embeddings.append(cls_emb)
+    
     return np.array(embeddings)
 
 def get_fusion_features(texts):
@@ -41,33 +42,25 @@ def get_fusion_features(texts):
     ppl_scaled = scaler.fit_transform(ppl_arr)
     
     fusion = np.concatenate([bert_emb, ppl_scaled], axis=1)
+    
     return fusion
 
 def run_bert_ppl_fusion():
     print("\n===== 正在运行 BERT + Perplexity 融合模型 =====")
+    
     train, test = load_hc3_data()
-
+    
     train_text = train["text"].apply(clean_text).tolist()
     test_text = test["text"].apply(clean_text).tolist()
+    
     y_train = train["label"].values
     y_test = test["label"].values
 
-    print("正在提取训练集 BERT 特征...")
-    X_train_bert = get_bert_sentence_embeddings(train_text)
-    print("正在提取测试集 BERT 特征...")
-    X_test_bert = get_bert_sentence_embeddings(test_text)
-
-    print("正在计算训练集困惑度...")
-    train_ppl = np.array([calculate_perplexity(t) for t in train_text]).reshape(-1, 1)
-    print("正在计算测试集困惑度...")
-    test_ppl = np.array([calculate_perplexity(t) for t in test_text]).reshape(-1, 1)
-
-    scaler = StandardScaler()
-    train_ppl_scaled = scaler.fit_transform(train_ppl)
-    test_ppl_scaled = scaler.transform(test_ppl)
-
-    X_train = np.concatenate([X_train_bert, train_ppl_scaled], axis=1)
-    X_test = np.concatenate([X_test_bert, test_ppl_scaled], axis=1)
+    print("正在生成训练集融合特征...")
+    X_train = get_fusion_features(train_text)
+    
+    print("正在生成测试集融合特征...")
+    X_test = get_fusion_features(test_text)
 
     clf = LogisticRegression(max_iter=1000, random_state=42)
     clf.fit(X_train, y_train)

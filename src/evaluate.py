@@ -1,8 +1,8 @@
 from src.tfidf_model import run_tfidf_lr
 from src.perplexity_model import run_perplexity_lr
-from src.bert_model import run_bert_finetune
 from src.length_model import run_length_lr
-from src.fusion_bert_ppl import run_bert_ppl_fusion, get_fusion_features
+from src.fusion_bert_ppl import run_bert_ppl_fusion
+from src.simple_fusion import run_simple_fusion, get_fusion_features
 from src.preprocess import load_hc3_data, clean_text
 
 import numpy as np
@@ -12,6 +12,7 @@ from sklearn.metrics import confusion_matrix, roc_curve, auc
 from sklearn.manifold import TSNE
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
+from sklearn.decomposition import PCA
 from transformers import BertTokenizer, BertModel
 import torch
 import os
@@ -74,11 +75,9 @@ def analyze_text_length():
     bins = np.arange(0, 1001, 20)
     
     sns.histplot(
-        human_lengths, label="Human", color="#4285F4", alpha=0.6, bins=bins
-    )
+        human_lengths, label="Human", color="#4285F4", alpha=0.6, bins=bins)
     sns.histplot(
-        ai_lengths, label="AI", color="#EA4335", alpha=0.6, bins=bins
-    )
+        ai_lengths, label="AI", color="#EA4335", alpha=0.6, bins=bins)
 
     plt.axvline(avg_human, color='#4285F4', linestyle='--', linewidth=2)
     plt.axvline(avg_ai, color='#EA4335', linestyle='--', linewidth=2)
@@ -118,8 +117,10 @@ def visualize_all_tsne():
     device = "cpu"  
 
     print("📊 生成 TF-IDF t-SNE...")
-    tfidf = TfidfVectorizer(max_features=10000, max_df=0.9, ngram_range=(1,2))
+    tfidf = TfidfVectorizer(max_features=10000, max_df=0.9,ngram_range=(1,2))
     emb_tfidf = tfidf.fit_transform(texts).toarray()
+    emb_tfidf = PCA(n_components=50, random_state=42).fit_transform(emb_tfidf)
+    
     tsne = TSNE(n_components=2, random_state=42, init="random", perplexity=30)
     emb2d = tsne.fit_transform(emb_tfidf)
     plt.figure(figsize=(8,6))
@@ -132,12 +133,13 @@ def visualize_all_tsne():
     plt.close()
 
     print("📊 生成 BERT t-SNE...")
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    model = BertModel.from_pretrained("bert-base-uncased").to(device).eval()
+    tokenizer = BertTokenizer.from_pretrained("bert_finetuned")
+    model = BertModel.from_pretrained("bert_finetuned").to(device).eval()
+    
     emb_bert = []
     with torch.no_grad():
         for txt in texts:
-            toks = tokenizer(txt, return_tensors="pt", truncation=True, max_length=128, padding="max_length")
+            toks = tokenizer(txt, return_tensors="pt", truncation=True, max_length=256, padding="max_length")
             toks = {k:v.to(device) for k,v in toks.items()}
             out = model(**toks)
             emb = out.last_hidden_state.mean(1).squeeze().cpu().numpy()
@@ -147,15 +149,43 @@ def visualize_all_tsne():
     plt.figure(figsize=(8,6))
     plt.scatter(emb2d[labels==0,0], emb2d[labels==0,1], c="blue", label="Human", alpha=0.4, s=12)
     plt.scatter(emb2d[labels==1,0], emb2d[labels==1,1], c="red", label="AI", alpha=0.4, s=12)
-    plt.title("t-SNE (BERT Embeddings)")
+    plt.title("t-SNE (BERT)")
     plt.legend()
     plt.tight_layout()
     plt.savefig("results/tsne_bert.png", dpi=150)
     plt.close()
 
+    print("📊 生成 Simple Fusion (BERT+PPL) t-SNE (PCA→TSNE)...")
+    emb_simple = get_fusion_features(texts)
+    emb_simple = PCA(n_components=50, random_state=42).fit_transform(emb_simple)
+    emb2d = TSNE(n_components=2, random_state=42, init="random", perplexity=30).fit_transform(emb_simple)
+    plt.figure(figsize=(8,6))
+    plt.scatter(emb2d[labels==0,0], emb2d[labels==0,1], c="blue", label="Human", alpha=0.4, s=12)
+    plt.scatter(emb2d[labels==1,0], emb2d[labels==1,1], c="red", label="AI", alpha=0.4, s=12)
+    plt.title("t-SNE | Simple Fusion (BERT+PPL)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("results/tsne_simple_fusion.png", dpi=150)
+    plt.close()
+
     print("📊 生成 BERT+PPL Fusion t-SNE...")
-    emb_fusion = get_fusion_features(texts)
+    from src.fusion_bert_ppl import BertFusionModel, get_ppl_features
+    fusion_model = BertFusionModel().to(device).eval()
+    ppls, _ = get_ppl_features(texts)
+    
+    emb_fusion = []
+    with torch.no_grad():
+        for txt, ppl in zip(texts, ppls):
+            toks = tokenizer(txt, return_tensors="pt", truncation=True, max_length=256, padding="max_length").to(device)
+            ppl_tensor = torch.tensor([ppl], dtype=torch.float32, device=device)
+            out = fusion_model.bert.bert(**toks)
+            cls_emb = out.pooler_output.squeeze(0)
+            feat = torch.cat([cls_emb, ppl_tensor], dim=-1)
+            emb_fusion.append(feat.cpu().numpy())
+    
+    emb_fusion = np.array(emb_fusion)
     emb2d = TSNE(n_components=2, random_state=42, init="random", perplexity=30).fit_transform(emb_fusion)
+    
     plt.figure(figsize=(8,6))
     plt.scatter(emb2d[labels==0,0], emb2d[labels==0,1], c="blue", label="Human", alpha=0.4, s=12)
     plt.scatter(emb2d[labels==1,0], emb2d[labels==1,1], c="red", label="AI", alpha=0.4, s=12)
@@ -165,11 +195,11 @@ def visualize_all_tsne():
     plt.savefig("results/tsne_bert_ppl_fusion.png", dpi=150)
     plt.close()
 
-    print("✅ t-SNE 图表全部生成完成！\n")
+    print("✅ t-SNE 全部完成！\n")
 
 def get_top_tfidf_features():
     print("\n" + "="*60)
-    print("🔍 Top 20 TF-IDF 特征词 (AI vs Human 中文专用)")
+    print("🔍 Top 20 TF-IDF 特征词")
     print("="*60)
 
     train, test = load_hc3_data()
@@ -203,7 +233,7 @@ def get_top_tfidf_features():
         f.write("\n\nTop 20 Human 标志性词汇：\n")
         f.write("\n".join(top_human))
     
-    print("\n✅ 特征词已保存到 results/top_tfidf_features.txt\n")
+    print("\n✅ 特征词已保存\n")
 
 def save_error_examples(model_name, y_true, y_pred, texts):
     fp_texts = []
@@ -219,77 +249,78 @@ def save_error_examples(model_name, y_true, y_pred, texts):
             fn_texts.append(txt)
 
     with open(f"results/error_samples_{model_name}.txt", "w", encoding="utf-8") as f:
-        f.write(f"=== {model_name} 错误样本分析 ===\n\n")
-        f.write(f"False Positive (真Human → 预测AI) 共10条：\n\n")
+        f.write(f"=== {model_name} 错误样本 ===\n\n")
+        f.write(f"False Positive (真Human→预AI)\n\n")
         for i, t in enumerate(fp_texts, 1):
             f.write(f"{i:2d}. {t}\n\n")
-
-        f.write(f"\nFalse Negative (真AI → 预测Human) 共10条：\n\n")
+        f.write(f"\nFalse Negative (真AI→预Human)\n\n")
         for i, t in enumerate(fn_texts, 1):
             f.write(f"{i:2d}. {t}\n\n")
-
-    print(f"✅ {model_name} FP/FN 样本已保存！")
+    print(f"✅ {model_name} 错误样本已保存！")
 
 def compare_models():
     print("=" * 70)
-    print("🚀 AI 生成文本检测：五模型对比实验")
+    print("🚀 AI 文本检测：全模型对比")
     print("=" * 70)
-
-    #  数据分析与可视化
-    analyze_text_length()
-    visualize_all_tsne()
-    get_top_tfidf_features()
 
     train, test = load_hc3_data()
     test_texts = [clean_text(str(t)) for t in test["text"]]
     y_test = test["label"].values
-    
-    # 运行各模型并保存错误样本
+
+    import shutil
+    shutil.rmtree("./bert_finetuned", ignore_errors=True)
+    from src.bert_model import run_bert_finetune
+    print("\n🔹 训练 BERT 基础模型...")
+    acc_bert, y_bert, pred_bert, score_bert = run_bert_finetune()
+
     acc4, y_true4, y_pred4, y_score4 = run_length_lr()
-    save_error_examples("Length", y_true4, y_pred4, test_texts)
-
     acc2, y_true2, y_pred2, y_score2 = run_perplexity_lr()
-    save_error_examples("Perplexity", y_true2, y_pred2, test_texts)
-
     acc1, y_true1, y_pred1, y_score1 = run_tfidf_lr()
-    save_error_examples("TF-IDF-LR", y_true1, y_pred1, test_texts)
-
-    acc3, y_true3, y_pred3, y_score3 = run_bert_finetune()
-    save_error_examples("BERT", y_true3, y_pred3, test_texts)
-
+    acc6, y_true6, y_pred6, y_score6 = run_simple_fusion()
     acc5, y_true5, y_pred5, y_score5 = run_bert_ppl_fusion()
+
+    save_error_examples("Length", y_true4, y_pred4, test_texts)
+    save_error_examples("Perplexity", y_true2, y_pred2, test_texts)
+    save_error_examples("TF-IDF-LR", y_true1, y_pred1, test_texts)
+    save_error_examples("Simple-Fusion", y_true6, y_pred6, test_texts)
+    save_error_examples("BERT", y_bert, pred_bert, test_texts)
     save_error_examples("BERT-PPL-Fusion", y_true5, y_pred5, test_texts)
 
-    # 绘制性能对比图表
+    analyze_text_length()
+    visualize_all_tsne()
+    get_top_tfidf_features()
+
     auc4 = plot_metrics(y_true4, y_pred4, y_score4, "Length-only-LR")
     auc2 = plot_metrics(y_true2, y_pred2, y_score2, "Perplexity-LR")
     auc1 = plot_metrics(y_true1, y_pred1, y_score1, "TF-IDF-LR")
-    auc3 = plot_metrics(y_true3, y_pred3, y_score3, "BERT")
+    auc6 = plot_metrics(y_true6, y_pred6, y_score6, "Simple-Fusion")
+    auc_bert = plot_metrics(y_bert, pred_bert, score_bert, "BERT")
     auc5 = plot_metrics(y_true5, y_pred5, y_score5, "BERT-PPL-Fusion")
 
-    # 最终结果对比表
     print("\n" + "=" * 70)
-    print("📊 最终模型性能对比表")
+    print("📊 最终结果")
     print("=" * 70)
-    print(f"{'模型':<22} {'准确率':<12} {'AUC':<12}")
+    print(f"{'模型':<25} {'ACC':<12} {'AUC':<12}")
     print("-" * 70)
-    print(f"{'Length-only LR':<22} {acc4:<12.4f} {auc4:<12.4f}")
-    print(f"{'Perplexity + LR':<22} {acc2:<12.4f} {auc2:<12.4f}")
-    print(f"{'TF-IDF + LR':<22} {acc1:<12.4f} {auc1:<12.4f}")
-    print(f"{'BERT Fine-tune':<22} {acc3:<12.4f} {auc3:<12.4f}")
-    print(f"{'BERT+PPL Fusion':<22} {acc5:<12.4f} {auc5:<12.4f}")
+    print(f"Length-only LR        | {acc4:.4f} | {auc4:.4f}")
+    print(f"Perplexity LR         | {acc2:.4f} | {auc2:.4f}")
+    print(f"TF-IDF LR             | {acc1:.4f} | {auc1:.4f}")
+    print(f"Simple Fusion         | {acc6:.4f} | {auc6:.4f}")
+    print(f"BERT                  | {acc_bert:.4f} | {auc_bert:.4f}")
+    print(f"BERT+PPL Fusion       | {acc5:.4f} | {auc5:.4f}")
     print("=" * 70)
 
     with open("results/experiment_result.txt", "w", encoding="utf-8") as f:
-        f.write("AI 文本检测模型对比结果\n")
-        f.write("="*40 + "\n")
+        f.write("最终模型对比结果（ACC + AUC）\n")
+        f.write("="*50 + "\n")
         f.write(f"Length-only LR:   Acc={acc4:.4f}, AUC={auc4:.4f}\n")
         f.write(f"Perplexity + LR:  Acc={acc2:.4f}, AUC={auc2:.4f}\n")
         f.write(f"TF-IDF + LR:      Acc={acc1:.4f}, AUC={auc1:.4f}\n")
-        f.write(f"BERT Fine-tune:   Acc={acc3:.4f}, AUC={auc3:.4f}\n")
+        f.write(f"Simple Fusion:    Acc={acc6:.4f}, AUC={auc6:.4f}\n")
+        f.write(f"BERT:             Acc={acc_bert:.4f}, AUC={auc_bert:.4f}\n")
         f.write(f"BERT+PPL Fusion:  Acc={acc5:.4f}, AUC={auc5:.4f}\n")
 
-    print("\n✅ 全部任务完成！")
+    print("\n✅ 全部完成！")
 
 if __name__ == "__main__":
     compare_models()

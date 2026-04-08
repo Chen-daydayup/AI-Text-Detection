@@ -1,73 +1,132 @@
 import torch
 import numpy as np
 from sklearn.metrics import accuracy_score
-from sklearn.linear_model import LogisticRegression
 from sklearn.preprocessing import StandardScaler
-from transformers import BertTokenizer, BertModel
+from transformers import BertTokenizer, BertForSequenceClassification, Trainer, TrainingArguments
 from src.preprocess import load_hc3_data, clean_text
 from src.perplexity_model import calculate_perplexity
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
-def get_bert_sentence_embeddings(texts):
-    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
-    model = BertModel.from_pretrained("bert-base-uncased").to(device).eval()
-    embeddings = []
+class FusionDataset(torch.utils.data.Dataset):
+    def __init__(self, texts, ppls, labels, tokenizer):
+        self.encodings = tokenizer(
+            texts,
+            truncation=True,
+            max_length=256,
+            padding="max_length",
+            return_tensors="pt"
+        )
+        self.ppls = torch.tensor(ppls, dtype=torch.float32)
+        self.labels = torch.tensor(labels, dtype=torch.long)
 
-    with torch.no_grad():
-        for text in texts:
-            inputs = tokenizer(
-                text,
-                return_tensors="pt",
-                truncation=True,
-                max_length=256,
-                padding="max_length"
-            ).to(device)
-            out = model(**inputs)
-            cls_emb = out.last_hidden_state[:, 0, :].squeeze().cpu().numpy()
-            embeddings.append(cls_emb)
-    
-    return np.array(embeddings)
+    def __len__(self):
+        return len(self.labels)
 
-def get_fusion_features(texts):
-    bert_emb = get_bert_sentence_embeddings(texts)
-    
+    def __getitem__(self, idx):
+        item = {
+            "input_ids": self.encodings["input_ids"][idx],
+            "attention_mask": self.encodings["attention_mask"][idx],
+            "ppl": self.ppls[idx],
+            "labels": self.labels[idx]
+        }
+        return item
+
+class BertFusionModel(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.bert = BertForSequenceClassification.from_pretrained(
+            "bert-base-uncased", num_labels=2
+        )
+        hidden_size = self.bert.config.hidden_size
+        self.bert.classifier = torch.nn.Linear(hidden_size + 1, 2)
+
+    def forward(self, input_ids, attention_mask, ppl, labels=None):
+        outputs = self.bert.bert(
+            input_ids=input_ids,
+            attention_mask=attention_mask
+        )
+        cls_emb = outputs.pooler_output
+
+        ppl = ppl.unsqueeze(-1)
+        fusion_emb = torch.cat([cls_emb, ppl], dim=-1)
+
+        logits = self.bert.classifier(fusion_emb)
+
+        loss = None
+        if labels is not None:
+            loss_fn = torch.nn.CrossEntropyLoss()
+            loss = loss_fn(logits, labels)
+
+        return {"loss": loss, "logits": logits}
+
+def get_ppl_features(texts, scaler=None):
     ppls = []
     for t in texts:
-        ppl = calculate_perplexity(t)
-        ppls.append(ppl)
-    ppl_arr = np.array(ppls).reshape(-1, 1)
+        try:
+            ppl = calculate_perplexity(t)
+            ppls.append(ppl)
+        except:
+            ppls.append(1000.0)  
+
+    ppls = np.array(ppls).reshape(-1, 1)
     
-    scaler = StandardScaler()
-    ppl_scaled = scaler.fit_transform(ppl_arr)
-    
-    fusion = np.concatenate([bert_emb, ppl_scaled], axis=1)
-    
-    return fusion
+    if scaler is None:
+        scaler = StandardScaler()
+        ppls = scaler.fit_transform(ppls)
+    else:
+        ppls = scaler.transform(ppls)
+    return ppls.flatten(), scaler
 
 def run_bert_ppl_fusion():
-    print("\n===== 正在运行 BERT + Perplexity 融合模型 =====")
-    
+    import shutil
+    shutil.rmtree("./fusion_ckpt", ignore_errors=True)
+    print("\n===== 【强融合】BERT + PPL 端到端训练 =====")
+
     train, test = load_hc3_data()
-    
     train_text = train["text"].apply(clean_text).tolist()
     test_text = test["text"].apply(clean_text).tolist()
-    
-    y_train = train["label"].values
-    y_test = test["label"].values
+    y_train = train["label"].tolist()
+    y_test = test["label"].tolist()
 
-    print("正在生成训练集融合特征...")
-    X_train = get_fusion_features(train_text)
-    
-    print("正在生成测试集融合特征...")
-    X_test = get_fusion_features(test_text)
+    train_ppl, scaler = get_ppl_features(train_text)
+    test_ppl, _ = get_ppl_features(test_text, scaler=scaler)
 
-    clf = LogisticRegression(max_iter=1000, random_state=42)
-    clf.fit(X_train, y_train)
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
-    y_pred = clf.predict(X_test)
-    y_score = clf.predict_proba(X_test)[:, 1]
+    model = BertFusionModel().to(device)
+
+    train_dataset = FusionDataset(train_text, train_ppl, y_train, tokenizer)
+    test_dataset = FusionDataset(test_text, test_ppl, y_test, tokenizer)
+
+    args = TrainingArguments(
+        output_dir="./fusion_ckpt",
+        per_device_train_batch_size=8,
+        per_device_eval_batch_size=8,
+        num_train_epochs=4,
+        learning_rate=1e-5,
+        eval_strategy="no",  
+        save_strategy="no",
+        disable_tqdm=False,
+        report_to="none",
+        seed=42,
+        load_best_model_at_end=False
+    )
+
+    trainer = Trainer(
+        model=model,
+        args=args,
+        train_dataset=train_dataset
+    )
+
+    trainer.train()
+    preds = trainer.predict(test_dataset)
+    y_pred = np.argmax(preds.predictions, axis=1)
+    y_score = preds.predictions[:, 1]
     acc = accuracy_score(y_test, y_pred)
 
-    print(f"BERT + PPL 融合模型 准确率: {acc:.4f}")
+    print(f"✅ 强融合模型 Acc: {acc:.4f}")
     return acc, y_test, y_pred, y_score
+
+if __name__ == "__main__":
+    run_bert_ppl_fusion()

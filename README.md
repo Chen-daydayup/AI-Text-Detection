@@ -37,7 +37,7 @@ flowchart TD
     C --> C2[语言模型特征：Perplexity + LR]
     C --> C3[传统机器学习：TF-IDF + LR]
     C --> C4[预训练模型：BERT Fine-tune]
-    C --> C5[简单特征融合：]
+    C --> C5[简单特征融合]
     C --> C6[深度特征融合（端到端）]
     C1 & C2 & C3 & C4 & C5 & C6 --> D[模型评估]
     D -- 准确率、AUC、混淆矩阵等 --> E[结果可视化]

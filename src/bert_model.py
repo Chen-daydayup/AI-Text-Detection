@@ -46,6 +46,7 @@ def run_bert_finetune():
         per_device_eval_batch_size=8,
         num_train_epochs=4,
         learning_rate=1e-5,
+        weight_decay=0.01,
         logging_steps=10,
         eval_strategy="no",
         save_strategy="no", 
